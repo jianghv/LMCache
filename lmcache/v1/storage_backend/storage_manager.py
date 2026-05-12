@@ -17,6 +17,7 @@ from typing import (
 )
 import asyncio
 import functools
+import time
 import threading
 
 # Third Party
@@ -558,6 +559,7 @@ class StorageManager:
         lookup_id: str,
         cum_chunk_lengths_total: list[int],
         tier_expected_chunks: list[int],
+        loading_task_backends: list[str],
     ) -> None:
         """
         Callback function when all prefetch tasks
@@ -627,6 +629,65 @@ class StorageManager:
                         mem_obj.ref_count_down()
                 break
 
+        # Register prefetched MemoryObjs into LocalCPUBackend.hot_cache so that
+        # subsequent synchronous retrieves and vLLM lookups can find them via
+        # prefix-match without re-reading from disk.
+        if (
+            self.local_cpu_backend is not None
+            and self.local_cpu_backend.use_hot
+            and total_retrieved_chunks > 0
+        ):
+            chunk_count = 0
+            for tier_result in res:
+                tier_keys = []
+                tier_objs = []
+                for key, mem_obj in tier_result:
+                    if chunk_count >= total_retrieved_chunks:
+                        break
+                    tier_keys.append(key)
+                    tier_objs.append(mem_obj)
+                    chunk_count += 1
+                if tier_keys:
+                    self.local_cpu_backend.batched_submit_put_task(
+                        tier_keys, tier_objs
+                    )
+                    # batched_get_non_blocking of LocalDiskBackend calls
+                    # memory_obj.pin() on newly allocated DDR buffers.
+                    # Release that pin now that the object is in hot_cache.
+                    if tier_idx < len(loading_task_backends) and loading_task_backends[tier_idx] not in ("LocalCPUBackend", "PDBackend", "MaruBackend"):
+                        for mem_obj in tier_objs:
+                            mem_obj.unpin()
+                if chunk_count >= total_retrieved_chunks:
+                    break
+
+        # Log from which backend each tier's chunks were retrieved
+        for tier_idx, tier_result in enumerate(res):
+            backend_name = (
+                loading_task_backends[tier_idx]
+                if tier_idx < len(loading_task_backends)
+                else "unknown"
+            )
+            logger.info(
+                "lookup_id=%s backend=%s retrieved=%d chunks",
+                lookup_id,
+                backend_name,
+                len(tier_result),
+            )
+
+        # Unpin all keys across the backends that pinned them.
+        # batched_async_contains(pin=True) pinned the original objects in
+        # each specific backend; we must unpin from those same backends.
+        # Using batched_unpin(all_keys) would unpin from ALL backends
+        # including ones that never pinned, causing double-unpin errors.
+        for tier_idx, tier_result in enumerate(res):
+            if tier_idx >= len(loading_task_backends):
+                break
+            backend_name = loading_task_backends[tier_idx]
+            backend = self.storage_backends.get(backend_name)
+            if backend is not None:
+                for key, _ in tier_result:
+                    backend.unpin(key)
+
         retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks]
         logger.info(
             f"Responding to scheduler for lookup id {lookup_id}"
@@ -641,6 +702,7 @@ class StorageManager:
         cum_chunk_lengths: list[int],
         search_range: Optional[list[str]] = None,
         pin: bool = False,
+        log_timing: bool = False,
     ) -> None:
         """
         Perform asynchronous lookup and prefetching across all storage backends.
@@ -688,6 +750,7 @@ class StorageManager:
         tier_expected_chunks = []
         # we also keep track of the keys for each tier and each chunk
         loading_task_keys: list[list[CacheEngineKey]] = []
+        loading_task_backends: list[str] = []
         for backend_name, backend in self.get_active_storage_backends(
             search_range=search_range
         ):
@@ -701,6 +764,7 @@ class StorageManager:
 
             backend_keys = keys[:num_hit_chunks]
             loading_task_keys.append(backend_keys)
+            loading_task_backends.append(backend_name)
 
             assert self.async_serializer is not None, (
                 "Async serializer must be initialized via post_init before using "
@@ -770,8 +834,18 @@ class StorageManager:
                 lookup_id,
                 cum_chunk_lengths_total,
                 tier_expected_chunks,
+                loading_task_backends,
             )
         )
+        if log_timing:
+            prefetch_start = time.perf_counter()
+            all_done.add_done_callback(
+                lambda _future: logger.info(
+                    "[LMCache TIMING] prefetch %s SSD->DDR: %.2f ms",
+                    lookup_id,
+                    (time.perf_counter() - prefetch_start) * 1000,
+                )
+            )
 
     def set_hot_cache(self, enabled: bool) -> None:
         """

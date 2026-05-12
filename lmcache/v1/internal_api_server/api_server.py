@@ -25,7 +25,7 @@ app = FastAPI()
 
 # Automatically register common, vllm, and controller APIs
 registry = APIRegistry(app)
-registry.register_all_apis(categories=["common", "vllm", "controller"])
+registry.register_all_apis(categories=["common", "vllm", "controller", "memory"])
 
 
 class InternalAPIServer:
@@ -93,6 +93,8 @@ class InternalAPIServer:
 
         self.server = uvicorn.Server(uvicorn.Config(**uvicorn_config))
         app.state.lmcache_adapter = lmcache_manager
+        app.state.internal_api_server_port_offset = port_offset
+        app.state.internal_api_server_port_start = config.internal_api_server_port_start
 
     async def run(self):
         logger.info(f"Running LMCache internal API server on {self.server_log_info}")

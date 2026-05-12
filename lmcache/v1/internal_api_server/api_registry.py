@@ -8,7 +8,7 @@ import pkgutil
 # Third Party
 from fastapi import APIRouter
 
-APICategory = Literal["common", "vllm", "controller"]
+APICategory = Literal["common", "vllm", "controller", "memory"]
 
 
 class APIRegistry:
@@ -19,6 +19,7 @@ class APIRegistry:
     - common: APIs that work for all components (metrics, logs, etc.)
     - vllm: APIs specific to vLLM scheduler/worker
     - controller: APIs specific to LMCache controller
+    - memory: APIs specific to LMCache memory component
     """
 
     def __init__(self, app):

@@ -157,27 +157,24 @@ class PinMonitor(PeriodicThread):
 
     def _force_unpin_timeout_object(self, memory_obj: "MemoryObj", elapsed_time: float):
         """Force unpin a timeout object and log the event."""
-        # Get current pin_count without holding the lock for unpin calls
-        # Use nullcontext if memory_obj doesn't have a lock attribute
         obj_lock = getattr(memory_obj, "lock", None) or nullcontext()
         with obj_lock:
-            current_pin_count = memory_obj.meta.pin_count
-            if current_pin_count <= 0:
+            pin_count_to_release = memory_obj.meta.pin_count
+            if pin_count_to_release <= 0:
                 return
 
             logger.warning(
                 "Pin timeout detected for MemoryObj %s. "
                 "Pin count: %s, Elapsed time: %.2fs. Forcing unpin to 0.",
                 memory_obj.meta.address,
-                current_pin_count,
+                pin_count_to_release,
                 elapsed_time,
             )
 
         # Update forced unpin statistics
         LMCStatsMonitor.GetOrCreate().update_forced_unpin_count(1)
 
-        # Call unpin() while pin_count > 0 to properly release resources
-        while memory_obj.meta.pin_count > 0:
+        for _ in range(pin_count_to_release):
             memory_obj.unpin()
 
     def _execute(self) -> ThreadRunSummary:

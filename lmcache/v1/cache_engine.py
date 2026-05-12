@@ -1317,7 +1317,6 @@ class LMCacheEngine:
             for key, memory_obj in memory_objs_flat:
                 try:
                     logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
-                    memory_obj.unpin()
                     memory_obj.ref_count_down()
                 except Exception as e:
                     logger.error(f"Error releasing memory object: {e}")
@@ -1376,6 +1375,8 @@ class LMCacheEngine:
             compressed_memory_obj = serializer.serialize(memory_obj)
             memory_obj.unpin()
             compressed_memory_objs.append(compressed_memory_obj)
+
+        self.lookup_pins.pop(event_id, None)
 
         self.storage_manager.batched_remove(keys, locations=[location])
 
@@ -1436,6 +1437,8 @@ class LMCacheEngine:
             memory_obj = deserializer.deserialize(compressed_memory_obj)
             compressed_memory_obj.unpin()
             memory_objs.append(memory_obj)
+
+        self.lookup_pins.pop(event_id, None)
 
         self.storage_manager.batched_remove(keys, locations=[location])
 
@@ -1649,6 +1652,12 @@ class LMCacheEngine:
             block_mapping = {location: chunk_infos}
         else:
             block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
+
+        logger.info(
+            "req_id=%s retrieve block_mapping: %s",
+            kwargs.get("req_id", "N/A"),
+            {loc: len(blks) for loc, blks in block_mapping.items()},
+        )
 
         last_failed_block_start = None
         for location, blocks in block_mapping.items():

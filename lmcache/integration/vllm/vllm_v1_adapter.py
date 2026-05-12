@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
+import time
 
 # Third Party
 from vllm.config import (
@@ -835,6 +836,7 @@ class LMCacheConnectorV1Impl:
                     next(layerwise_retriever)
                     self.layerwise_retrievers.append(layerwise_retriever)
             else:
+                t0 = time.perf_counter()
                 ret_token_mask = self.lmcache_engine.retrieve(
                     tokens[:lmcache_cached_tokens],
                     token_mask[:lmcache_cached_tokens],
@@ -844,11 +846,18 @@ class LMCacheConnectorV1Impl:
                     request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
+                kv_load_ms = (time.perf_counter() - t0) * 1000
 
-                # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 num_expected_tokens = (
                     lmcache_cached_tokens - request.load_spec.vllm_cached_tokens
+                )
+                logger.info(
+                    "[RETRIEVE TIMING] req=%s KV-loaded=%d/%d tokens retrieve_time=%.2fms",
+                    request.req_id,
+                    num_retrieved_tokens,
+                    lmcache_cached_tokens,
+                    kv_load_ms,
                 )
                 if num_retrieved_tokens < num_expected_tokens:
                     logger.error(
